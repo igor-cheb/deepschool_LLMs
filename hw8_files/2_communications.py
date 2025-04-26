@@ -19,7 +19,12 @@ def print_rank_0(message):
 
     Нужно использовать dist.get_rank и dist.barrier
     """
-    raise NotImplemented()
+
+    if local_rank == 0:
+        print(message)
+
+    dist.barrier()
+    # raise NotImplemented()
 
 
 
@@ -36,9 +41,17 @@ def blocking_send_to_last():
     Документация https://pytorch.org/docs/stable/distributed.html#point-to-point-communication
     
     """
-
-    send_value = torch.Tensor([dist.get_rank()]).long()
-    raise NotImplemented()
+    if local_rank != world_size - 1:
+        send_value = torch.Tensor([dist.get_rank()]).long()
+        # если не последний процесс, то посылаем свой ранг
+        dist.send(send_value, dst=world_size - 1)
+    else:
+        # если последний процесс, то принимаем от всех остальных
+        recv_tensor = torch.zeros(world_size - 1).long()
+        for i in range(world_size - 1):
+            dist.recv(tensor=recv_tensor[i])
+        print(f"Сумма рангов всех процессов: {recv_tensor.sum().item()}")
+    dist.barrier()
     print_rank_0("Успешно послали свои ранги последнему процессу")
     
 
@@ -61,14 +74,23 @@ def cyclic_send_recv():
     """
     values_to_send = [10, 20, 30, 40]
     values_to_recv = [40, 10, 20, 30]
-    send_tensor = torch.Tensor([values_to_send[dist.get_rank()]])
+    send_tensor = torch.Tensor([values_to_send[local_rank]])
     recv_tensor = torch.zeros_like(send_tensor)
-    raise NotImplemented()
+    
+    # асинхронная отправка и получение
+    send_req = dist.isend(tensor=send_tensor, dst=local_rank + 1 if local_rank != world_size - 1 else 0)
+    recv_req = dist.irecv(tensor=recv_tensor)
+
+    # Ждём завершения отправки и получения
+    send_req.wait()
+    recv_req.wait()
+
+    assert(recv_tensor.long().item() == values_to_recv[local_rank])
     print_rank_0("Процессы успешно получили тензоры соседних процессов!")
 
 
 # group_comms - 5 баллов
-def group_comms():
+def group_comms(debug: bool=False):
     """
     На каждом ранге гененрируется случайный тензор.
     Ваша задача:
@@ -76,7 +98,19 @@ def group_comms():
     2. Собрать все local_tensor на всех процессах с помощью all_gather и найти минимальное значение
     """
     local_tensor = torch.rand(1)
-    raise NotImplemented()
+    
+    # Собрать все local_tensor на всех процессах с помощью all_gather и найти минимальное значение
+    gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+    dist.all_gather(gathered_tensors, local_tensor)
+    min_value = min([el.item() for el in gathered_tensors])
+    
+    # С помощью операции all_reduce найти минимальное значение среди всех local_tensor
+    dist.all_reduce(local_tensor, op=dist.ReduceOp.MIN)
+
+    if debug:
+        print_rank_0(f"\tМинимальное значение через all_gather: {min_value} из {torch.tensor(gathered_tensors)}")
+        print_rank_0(f"\tМинимальное значение через all_reduce: {local_tensor.item()}")
+
     print_rank_0("Успешно провели групповые коммуникации!")
     
 
@@ -91,4 +125,4 @@ if __name__ == "__main__":
     print_rank_0("Это сообщение должно быть выведено всего один раз")
     blocking_send_to_last()
     cyclic_send_recv()
-    group_comms()
+    group_comms(debug=True)
