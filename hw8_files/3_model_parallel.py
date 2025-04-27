@@ -13,7 +13,9 @@ def send_2d_tensor(tensor, dst):
     Давайте напишем функцию, которая вначале посылает двумерный тензор shape размерностей тензора, а потом
     уже его содержимое
     """
-    raise NotImplemented()
+    # raise NotImplemented()
+    dist.send(torch.tensor(tensor.shape), dst=dst)
+    dist.send(tensor, dst=dst)
 
 
 def recv_2d_tensor(src):
@@ -23,8 +25,15 @@ def recv_2d_tensor(src):
     2. Создавать тензор нужных размерностей для приема данных
     3. Принимать данные в этот тензор и возвращать его
     """
-    raise NotImplemented()
+    # raise NotImplemented()
 
+    shape = torch.zeros(2).long()
+    dist.recv(shape, src=src)
+
+    tensor = torch.zeros(shape.tolist())
+    dist.recv(tensor, src=src)
+
+    return tensor
 
 class PipeliningLinearLayer(nn.Module):
 
@@ -33,12 +42,23 @@ class PipeliningLinearLayer(nn.Module):
         self.ln1 = nn.Linear(16, 32)
         self.ln2 = nn.Linear(32, 64)
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Здесь нужно дописать логику, описанную в test_pipelining
         
         """
-        raise NotImplemented()
+        if local_rank == 0:
+            # на 0м процессе применяем первый линейный слой к входному тензору
+            x = self.ln1(x)
+            # посылаем результат на 1й процесс
+            send_2d_tensor(tensor=x, dst=1)
+            return None
+        elif local_rank == 1:
+            # на 1м процессе принимаем результат и возвращаем его
+            x = recv_2d_tensor(src=0)
+            x = self.ln2(x)
+            return x
+        # raise NotImplemented()
         
 
     def forward_full_rank_0(self, x):
@@ -90,13 +110,21 @@ def test_tensor_parallel():
     X = torch.rand(7, 16)
     dist.broadcast(X, 0)
 
-    if dist.get_rank() == 0:
-        raise NotImplemented()
-    else:
-        raise NotImplemented()
-    
-    Y_REF = X @ A
+    # Так как разбиваем по последней размерности, умножение на X будет работать не зависимо от workd_size
+    local_chunk = A.chunk(world_size, dim=-1)[local_rank]
+    Y = X @ local_chunk
 
+    gathered_tensors = [torch.zeros_like(Y) for _ in range(world_size)]
+    dist.all_gather(tensor_list=gathered_tensors, tensor=Y)
+
+    # конструкцию if else удалил т.к. не пригодилась, согласовано в чате https://t.me/c/2282620518/847/910
+    # if dist.get_rank() == 0:
+    #     raise NotImplemented()
+    # else:
+    #     raise NotImplemented()
+
+    Y = torch.cat(gathered_tensors, dim=-1)
+    Y_REF = X @ A
     assert torch.allclose(Y_REF, Y)
     print("Успешно отработал tensor parallel")
     
@@ -108,5 +136,6 @@ if __name__ == "__main__":
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     dist.init_process_group(backend=get_backend(), rank=local_rank, world_size=world_size)
+    
     test_pipelining()
     test_tensor_parallel()
